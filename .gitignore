@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets — NEVER commit
+google_token.json
+google_client_secret.json
+*client_secret*
+.hardmail_pkce
+*.pkce
+.env
+.env.*
+*.pem
+*.key
+
+# Runtime state (lives in $HERMES_HOME, not the repo)
+youshallnotpass.json
+config.yaml

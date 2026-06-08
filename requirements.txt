@@ -1,0 +1,5 @@
+# hardmail — Gmail backend (default) deps. The IMAP/SMTP and Resend send
+# paths use only the Python standard library (imaplib, smtplib, urllib).
+google-auth
+google-auth-oauthlib
+google-api-python-client

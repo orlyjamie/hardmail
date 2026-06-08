@@ -1,0 +1,11 @@
+name: hardmail
+version: 1.1.0
+description: "Hardened, native email tools — no terminal, no gws CLI. Default backend is the Gmail API (read + send), reusing the SAME OAuth token as hardcal (HERMES_HOME/google_token.json) so replies thread back into the inbox the agent reads. Alternative backend (HARDMAIL_BACKEND=imap) is IMAP read + SMTP/Resend send for non-Google providers. Reads are open and side-effect-free; mail_send is the only egress and is operator-approved + fail-closed. Bodies/attachments are treated as untrusted."
+author: theonejvo (Jamieson O'Reilly)
+license: MIT
+kind: standalone
+provides_tools:
+  - mail_search
+  - mail_get
+  - mail_get_attachment
+  - mail_send
