@@ -58,18 +58,41 @@ def _backend() -> str:
     return "gmail" if (_hermes_home() / "google_token.json").exists() else "imap"
 
 
-def _require_send_approval(summary: str) -> bool:
-    """Block until the operator approves (Telegram buttons / CLI prompt). FAIL CLOSED."""
+def _require_send_approval(summary: str, pattern_key: str = "mail_send") -> bool:
+    """Block until the operator approves (Telegram buttons / CLI prompt). FAIL CLOSED.
+
+    Honours the operator's chosen SCOPE so we don't re-prompt:
+      "Session"  -> approve_session(): no more prompts for `pattern_key` this session
+      "Always"   -> approve_permanent(): persisted to the config allowlist
+    and we short-circuit if the pattern is already session/permanently approved."""
     try:
         from tools import approval as A
         session_key = A.get_current_session_key()
+        # Already approved (Session earlier, or Always)? Don't prompt again.
+        try:
+            if A.is_approved(session_key, pattern_key):
+                return True
+        except Exception:
+            pass
         notify_cb = getattr(A, "_gateway_notify_cbs", {}).get(session_key)
-        data = {"command": summary, "description": summary, "pattern_key": "mail_send"}
+        data = {"command": summary, "description": summary, "pattern_key": pattern_key}
         if notify_cb is not None:
             res = A._await_gateway_decision(session_key, notify_cb, data) or {}
             choice = res.get("choice")
         else:
             choice = A.prompt_dangerous_approval(summary, summary)
+        # Persist the chosen scope so "Session"/"Always" actually stick.
+        try:
+            if choice == "session":
+                A.approve_session(session_key, pattern_key)
+            elif choice == "always":
+                A.approve_permanent(pattern_key)
+                try:
+                    A.save_permanent_allowlist(A._permanent_approved)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return choice in ("once", "session", "always", "approve", "yes", "y")
     except Exception as e:
         logger.warning("hardmail: send approval unavailable (%s) — denying send", e)
