@@ -130,14 +130,26 @@ def _g_headers(msg):
 
 
 def _g_body(msg):
-    p = msg.get("payload", {})
     dec = lambda d: base64.urlsafe_b64decode(d).decode("utf-8", "replace")
+
+    def find(p, mt):
+        # Recurse: with attachments the text part sits inside a nested
+        # multipart/alternative, one level below the multipart/mixed payload.
+        if p.get("mimeType") == mt and p.get("body", {}).get("data"):
+            return dec(p["body"]["data"])
+        for part in (p.get("parts") or []):
+            hit = find(part, mt)
+            if hit:
+                return hit
+        return None
+
+    p = msg.get("payload", {})
     if p.get("body", {}).get("data"):
         return dec(p["body"]["data"])
     for mt in ("text/plain", "text/html"):
-        for part in (p.get("parts") or []):
-            if part.get("mimeType") == mt and part.get("body", {}).get("data"):
-                return dec(part["body"]["data"])
+        hit = find(p, mt)
+        if hit:
+            return hit
     return ""
 
 
@@ -248,6 +260,22 @@ def _imap_clean(v):
     return (v or "").replace('"', "").replace("\r", "").replace("\n", "").strip()
 
 
+_IMAP_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _imap_date(v):
+    """Schema promises YYYY-MM-DD; IMAP SINCE wants DD-Mon-YYYY. Month names are
+    built by hand — strftime %b is locale-dependent and IMAP is not."""
+    from datetime import datetime as _dt
+    s = _imap_clean(v)
+    try:
+        d = _dt.strptime(s, "%Y-%m-%d")
+        return f"{d.day:02d}-{_IMAP_MONTHS[d.month - 1]}-{d.year}"
+    except ValueError:
+        return s  # assume it's already an IMAP-format date
+
+
 def _imap():
     import imaplib
     M = imaplib.IMAP4_SSL(_env("HARDMAIL_IMAP_HOST", required=True),
@@ -265,7 +293,7 @@ def _i_search(a):
     if a.get("subject"):
         parts.append(f'SUBJECT "{_imap_clean(a["subject"])}"')
     if a.get("since"):
-        parts.append(f"SINCE {_imap_clean(a['since'])}")
+        parts.append(f"SINCE {_imap_date(a['since'])}")
     criteria = " ".join(parts) or "ALL"
     M = _imap()
     try:
@@ -410,19 +438,29 @@ def mail_send(args, **kw):
         attachments = a.get("attachments") or []
         if isinstance(attachments, str):
             attachments = [attachments]
-        _body = " ".join((a.get("body", "") or "").split())   # collapse whitespace for the card
-        _body_preview = _body[:300] + ("…" if len(_body) > 300 else "")
-        summary = (f"mail_send → to: {a.get('to','')} | subject: {a.get('subject','')!r} | "
-                   f"attachments: {[os.path.basename(x) for x in attachments]}\n"
-                   f"body: {_body_preview}")
-        if not _require_send_approval(summary):   # EGRESS GATE — fail closed
-            return "Send cancelled — operator did not approve."
+        # Validate attachments BEFORE prompting (the operator should never approve a
+        # send that then fails) and resolve to ABSOLUTE paths for the card — a
+        # basename like 'google_token.json' must not hide where it came from.
         files = []
         for fp in attachments:
-            p = Path(fp)
+            p = Path(fp).expanduser()
             if not p.exists():
                 return f"Attachment not found: {fp}"
-            files.append(p)
+            files.append(p.resolve())
+        _body = " ".join((a.get("body", "") or "").split())   # collapse whitespace for the card
+        _body_preview = _body[:300] + ("…" if len(_body) > 300 else "")
+        summary = (f"mail_send → to: {a.get('to','')}"
+                   + (f" | cc: {a['cc']}" if a.get("cc") else "")
+                   + f" | subject: {a.get('subject','')!r} | "
+                   f"attachments: {[str(p) for p in files]}\n"
+                   f"body: {_body_preview}")
+        # Scope "Session"/"Always" approvals to THIS recipient set, so approving a
+        # batch to one address never green-lights sends to arbitrary others.
+        recipients = ",".join(sorted(
+            x.strip().lower()
+            for x in f"{a.get('to', '')},{a.get('cc', '')}".split(",") if x.strip()))
+        if not _require_send_approval(summary, pattern_key=f"mail_send:{recipients}"):
+            return "Send cancelled — operator did not approve."   # EGRESS GATE — fail closed
         return _g_send(a, files) if _backend() == "gmail" else _i_send(a, files)
     except Exception as e:
         return f"mail_send error: {e}"
@@ -533,7 +571,7 @@ _SETUP_HELP = (
     "5. Download the JSON file.\n\n"
     "STEP 2 · paste the whole file to me:\n"
     "/hardmail client <PASTE THE JSON HERE>\n\n"
-    "I'll reply with a link. Approve it → the page will fail on localhost:1 (that's\n"
+    "I'll reply with a link. Approve it → the page will fail on localhost:8765 (that's\n"
     "expected) → copy the code= value from the address bar → finish with:\n"
     "/hardmail code <CODE>"
 )
@@ -571,13 +609,13 @@ def _slash_hardmail(raw_args: str):
         except Exception as e:
             return f"Saved the client, but couldn't build the link: {e}"
         return ("✅ Client saved. Open this, approve, then copy the code= value from the "
-                f"localhost:1 page:\n\n{url}\n\nFinish with:  /hardmail code <CODE>")
+                f"localhost:8765 page:\n\n{url}\n\nFinish with:  /hardmail code <CODE>")
 
     if sub == "url":
         if not _client_path().exists():
             return "No client yet — run /hardmail setup first."
         try:
-            return f"Approve, then copy the code= from the localhost:1 page:\n\n{_auth_url()}\n\n/hardmail code <CODE>"
+            return f"Approve, then copy the code= from the localhost:8765 page:\n\n{_auth_url()}\n\n/hardmail code <CODE>"
         except Exception as e:
             return f"Couldn't build the link: {e}"
 
@@ -606,7 +644,24 @@ def _slash_hardmail(raw_args: str):
     return _SETUP_HELP
 
 
+def _check_approval_contract() -> None:
+    """The send gate leans on private tools.approval members. If a Hermes upgrade
+    renames them, mail_send fails closed (deny) — warn at startup, not mid-task."""
+    try:
+        from tools import approval as A
+        missing = [n for n in ("get_current_session_key", "is_approved",
+                               "_gateway_notify_cbs", "_await_gateway_decision",
+                               "prompt_dangerous_approval", "approve_session",
+                               "approve_permanent") if not hasattr(A, n)]
+        if missing:
+            logger.warning("hardmail: tools.approval is missing %s — mail_send will "
+                           "fail closed (deny) until this plugin is updated", missing)
+    except Exception as e:
+        logger.warning("hardmail: tools.approval unavailable (%s) — mail_send will fail closed", e)
+
+
 def register(ctx) -> None:
+    _check_approval_contract()
     ctx.register_tool(name="mail_search", toolset="hardmail", schema=MAIL_SEARCH_SCHEMA,
                       handler=mail_search, description="Search mailbox (read-only)", emoji="\U0001F50D")
     ctx.register_tool(name="mail_get", toolset="hardmail", schema=MAIL_GET_SCHEMA,
